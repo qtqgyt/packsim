@@ -1,0 +1,8 @@
+[package]
+name = "packopener-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libloading = "0.9.0"
+terminal_size = "0.4"

@@ -1,0 +1,70 @@
+# packsim
+
+High-performance, bit-exact pack opening simulator for *TCG Card Shop Simulator*.
+
+PackSim reproduces the game's pack-opening results. On a Tesla T4, I get around 2 billion packs/sec on some eitems. [T4 results](docs/benchmarks/2026-10-24-turing-deferred-compact-current-main.md)
+
+---
+
+## Features
+
+- Bit-exact CPU and CUDA results against saved reference files
+- Merge cards, XP, and shop coins into a save
+- Multi-threaded CPU and CUDA backends
+- CPU runs can resume from checkpoints. Turing GPU runs cannot resume an interrupted checkpoint.
+
+---
+
+## Building
+
+### Prerequisites
+
+- **CMake**: 3.18 or newer.
+- **CPU backend**: C++17 compiler with OpenMP (`g++`, `clang++`, or MSVC).
+- **CLI**: Rust toolchain (`cargo`, `rustup`).
+- **GPU backend (optional)**: NVIDIA CUDA Toolkit (`nvcc`).
+
+### Build
+
+```bash
+cmake -S . -B build
+cmake --build build
+cmake --build build --target packopener-cli
+```
+
+### Run Tests
+
+```bash
+./test.sh
+```
+
+---
+
+## CLI Usage
+
+```text
+packopener-cli <eitem> [count] [options]    simulate and merge into a save
+packopener-cli list                         show pack types
+packopener-cli status                       show save state
+packopener-cli benchmark [packs] [options]  measure backend throughput
+packopener-cli merge [file] [options]       merge a results file
+packopener-cli export <file> --format <f>   export results as CSV or JSON
+```
+
+### Examples
+
+Simulate without merging:
+```bash
+./packopener-cli 0 1000000 --seed 0x12345678abcdef01 --dry-run
+```
+
+Simulate and merge into save:
+```bash
+./packopener-cli 0 500000 --apply
+```
+
+---
+
+## License
+
+MIT License. See [LICENSE](LICENSE) for details.

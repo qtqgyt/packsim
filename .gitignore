@@ -1,0 +1,38 @@
+# Local Cargo source overrides and vendored dependencies
+/cli/.cargo/
+/cli/vendor/
+
+# Rust build output
+/cli/target/
+/wasm/target/
+/build/
+
+# Local Colab experiments and test output
+/.colab/
+/.testrun/
+/results.ckpt*
+/results.simple
+/results_sold.simple
+
+# Generated native binaries and temporary build files
+/libpackopen_cpu.so
+/libpackopen_gpu.so
+/packopener-cli
+/libpackopen_cpu.so.tmp
+/libpackopen_gpu.so.tmp
+/packopener-cli.tmp
+*.orig
+
+# Generated Windows package (keep the tracked build script)
+/.winbuild/packsim-win/
+/.winbuild/packsim-win-*.zip
+/src.zip
+
+# Generated WebAssembly binary
+/web/packsim_wasm.wasm
+/bench/cpu_bench
+/target/
+
+# Documentation
+/docs/
+
