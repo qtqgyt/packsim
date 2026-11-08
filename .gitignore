@@ -34,5 +34,15 @@
 /target/
 
 # Documentation
-/docs/
+/docs/*
+!/docs/gpu-builds.md
+!/docs/benchmarks/
+/docs/benchmarks/*
+!/docs/benchmarks/2026-10-24-t4-scoped-geometry-validation.md
+!/docs/benchmarks/2026-10-25-t4-a100-scoped-geometry-validation.md
+!/docs/benchmarks/2026-10-24-a100-geometry-512-native-confirm.md
+!/docs/benchmarks/2026-10-24-ada-l4-native-grid-confirm.md
+!/docs/benchmarks/2026-10-24-blackwell-native-grid-confirm.md
 
+# Agent notes
+/AGENTS.md

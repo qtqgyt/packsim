@@ -1,17 +1,21 @@
-mod export;
 mod backend;
+mod export;
 mod json;
 mod save;
+mod simple;
 mod tables_gen {
     include!("tables_gen.rs");
 }
 mod ui;
 
 use backend::{backend_progress, default_threads, load_backend, Backend};
-use save::{json_f64, json_i64, merge_into_save, save_path, unit_price};
+use save::{
+    amt_key, json_f64, json_i64, merge_into_save, save_path, unit_price, validate_pack_save_fields,
+};
 use std::ffi::c_void;
 use std::fs;
 use std::io::IsTerminal;
+use std::path::Path;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
@@ -36,13 +40,71 @@ fn packmap(eitem: i32) -> Option<(i32, i32)> {
     PACKMAP.iter().find(|p| p.0 == eitem).map(|p| (p.1, p.2))
 }
 
-fn status() {
-    let sp = save_path(None);
-    let txt = fs::read_to_string(&sp).unwrap_or_default();
+fn pack_save_supported(eitem: i32) -> bool {
+    packmap(eitem)
+        .and_then(|(_, exp)| amt_key(exp, 0))
+        .is_some()
+}
+
+fn results_stem(path: &str) -> String {
+    let path = Path::new(path);
+    let file_name = path.file_name().unwrap_or_default();
+    let stem = Path::new(file_name).file_stem().unwrap_or(file_name);
+    path.with_file_name(stem).to_string_lossy().into_owned()
+}
+
+fn status(args: &[String]) {
+    let mut slot: Option<usize> = None;
+    let mut slot_was_set = false;
+    let mut save_override: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--slot" => {
+                slot_was_set = true;
+                i += 1;
+                slot = Some(match args.get(i).and_then(|s| s.parse::<usize>().ok()) {
+                    Some(v) => v,
+                    None => {
+                        eprintln!("error: --slot needs a number");
+                        std::process::exit(2);
+                    }
+                });
+            }
+            "--save" | "--slot-file" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    save_override = Some(v.clone());
+                } else {
+                    eprintln!("error: --save needs a file path");
+                    std::process::exit(2);
+                }
+            }
+            s => {
+                eprintln!("error: unknown argument: {} (see: packopener-cli help)", s);
+                std::process::exit(2);
+            }
+        }
+        i += 1;
+    }
+    if slot_was_set && save_override.is_some() {
+        eprintln!("error: --slot and --save cannot be combined");
+        std::process::exit(2);
+    }
+    let sp = save_override
+        .map(|s| s.trim_end_matches(['/', '\\']).to_string())
+        .unwrap_or_else(|| save_path(slot));
+    println!("save: {}", sp);
+    let txt = match fs::read_to_string(&sp) {
+        Ok(t) => t,
+        Err(e) => {
+            println!("  missing or unreadable: {}", e);
+            return;
+        }
+    };
     let idx = json_i64(&txt, "\"m_SaveIndex\"").unwrap_or(-1);
     let level = json_i64(&txt, "\"m_ShopLevel\"").unwrap_or(-1);
     let coins = json_f64(&txt, "\"m_CoinAmountDouble\"").unwrap_or(0.0);
-    println!("save: {}", sp);
     println!("  slot {} | level {} | {}", idx, level, money(coins));
 }
 
@@ -59,10 +121,14 @@ fn list_packs() {
             (6, 1) => "DestinyEpic",
             (7, 1) => "DestinyLegendary",
             (8, 2) => "Ghost",
+            (9, 3) => "Megabot",
+            (10, 4) => "FantasyRPG",
+            (11, 5) => "CatJob",
             _ => "?",
         };
         println!("{:>5}  {:>10}  {:>3}  {}", e, c, x, name);
     }
+    println!("{:>5}  {:>10}  {:>3}  Ascension", 129, 15, 7);
 }
 
 fn generate_random_seed() -> u64 {
@@ -145,11 +211,11 @@ fn usage() -> &'static str {
     "packopener-cli: simulate pack openings + merge results into the game save.
 
 Usage:
-  packopener-cli <eitem> [count] [options]    simulate + merge (--dry-run to skip)
+  packopener-cli <eitem> [count] [options]    simulate pack openings (dry-run by default; --apply to merge)
   packopener-cli list                         show pack types
-  packopener-cli merge [file] [options]       merge an existing results file
+  packopener-cli merge [file] [options]       merge an existing results file (dry-run by default; --apply to write)
   packopener-cli export <file> --format <f> [opts] export results file
-  packopener-cli status                       show save state
+  packopener-cli status [options]             show save state
   packopener-cli benchmark [packs] [options]  measure backend throughput
   packopener-cli help                         this text
 
@@ -164,15 +230,22 @@ Options (simulate):
   --results F  results file (default: results.simple)
   --sold F     sold file (default: beside the results file)
   --width N    terminal width override for the progress bar
-  --apply      write the save (--dry-run to skip)
+  --apply      write the save (default: dry-run only)
+  --dry-run    skip writing to the save file (default)
   --debug      verbose progress diagnostics
 
 Options (merge):
   [file]       results file (default: results.simple)
   --results F  results file (explicit)
-  --sold F     sold file (default: results_sold.simple)
+  --sold F     sold file (default: beside the results file)
+  --slot N     save slot to merge into (default: 0)
   --save F     save file (explicit)
-  --apply      write the save (--dry-run to skip)
+  --apply      write the save (default: dry-run only)
+  --dry-run    skip writing to the save file (default)
+
+Options (status):
+  --slot N     save slot to inspect (default: 0)
+  --save F     save file (explicit)
 
 Options (export):
   <file>       results file
@@ -186,15 +259,19 @@ Options (benchmark):
   --seed N     PRNG root seed (default: random)
 
 Long sims checkpoint beside the results file (rerun to resume; no merge until the run completes).
-Merge deducts pack cost (count x unit price) from coins, then adds overflow-sold cash.
+Pack IDs 17–19 map to Megabot, FantasyRPG, and CatJob. Applying them requires the matching inventory arrays in the save.
+Simulate with --apply deducts pack cost (count x unit price) from coins, then adds overflow-sold cash.
+Standalone merge only merges cards and sold-card cash into save; it does not deduct pack cost.
 Every merged slot is capped at 2147483647; excess is auto-sold at market price."
 }
 
 fn cmd_merge(args: &[String]) {
     let mut results = "results.simple".to_string();
-    let mut sold = "results_sold.simple".to_string();
+    let mut sold_flag: Option<String> = None;
     let mut save: Option<String> = None;
-    let mut apply = true;
+    let mut slot: Option<usize> = None;
+    let mut slot_was_set = false;
+    let mut apply = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -204,34 +281,61 @@ fn cmd_merge(args: &[String]) {
                 i += 1;
                 if let Some(v) = args.get(i) {
                     results = v.clone();
+                } else {
+                    eprintln!("error: --results needs a file path");
+                    std::process::exit(2);
                 }
             }
             "--sold" => {
                 i += 1;
                 if let Some(v) = args.get(i) {
-                    sold = v.clone();
+                    sold_flag = Some(v.clone());
+                } else {
+                    eprintln!("error: --sold needs a file path");
+                    std::process::exit(2);
                 }
+            }
+            "--slot" => {
+                slot_was_set = true;
+                i += 1;
+                slot = Some(match args.get(i).and_then(|s| s.parse::<usize>().ok()) {
+                    Some(v) => v,
+                    None => {
+                        eprintln!("error: --slot needs a number");
+                        std::process::exit(2);
+                    }
+                });
             }
             "--save" | "--slot-file" => {
                 i += 1;
                 if let Some(v) = args.get(i) {
                     save = Some(v.clone());
+                } else {
+                    eprintln!("error: --save needs a file path");
+                    std::process::exit(2);
                 }
             }
-            s if !s.starts_with("--") => {
+            s if s.starts_with('-') => {
+                eprintln!("error: unknown argument: {} (see: packopener-cli help)", s);
+                std::process::exit(2);
+            }
+            s => {
                 if s.ends_with(".json") {
                     save = Some(s.to_string());
                 } else {
                     results = s.to_string();
                 }
             }
-            _ => {}
         }
         i += 1;
     }
+    if slot_was_set && save.is_some() {
+        eprintln!("error: --slot and --save cannot be combined");
+        std::process::exit(2);
+    }
     let sp = save
         .map(|s| s.trim_end_matches(['/', '\\']).to_string())
-        .unwrap_or_else(|| save_path(None));
+        .unwrap_or_else(|| save_path(slot));
     let results_text = match fs::read_to_string(&results) {
         Ok(t) => t,
         Err(e) => {
@@ -239,14 +343,50 @@ fn cmd_merge(args: &[String]) {
             std::process::exit(1);
         }
     };
-    let sold_text = if !sold.is_empty() {
-        fs::read_to_string(&sold).unwrap_or_default()
+    let default_sold = format!("{}_sold.simple", results_stem(&results));
+
+    let sold_text = if let Some(ref explicit_sold) = sold_flag {
+        if Path::new(explicit_sold).exists() {
+            match fs::read_to_string(explicit_sold) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!(
+                        "warning: cannot read sold file {}: {} (skipping sold cards)",
+                        explicit_sold, e
+                    );
+                    String::new()
+                }
+            }
+        } else {
+            eprintln!(
+                "warning: specified sold file {} not found (skipping sold cards)",
+                explicit_sold
+            );
+            String::new()
+        }
+    } else if Path::new(&default_sold).exists() {
+        match fs::read_to_string(&default_sold) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!(
+                    "warning: cannot read sold sidecar {}: {} (skipping sold cards)",
+                    default_sold, e
+                );
+                String::new()
+            }
+        }
     } else {
+        eprintln!(
+            "note: sold sidecar {} not found (skipping sold cards)",
+            default_sold
+        );
         String::new()
     };
+
     eprintln!("note: merging a file does not deduct pack cost (unknown)");
     match merge_into_save(&sp, apply, &results_text, &sold_text, 0.0) {
-        Ok(()) => eprintln!("merge ok"),
+        Ok(()) if apply => eprintln!("merge ok"),
+        Ok(()) => eprintln!("dry run ok (save not modified; pass --apply to write)"),
         Err(e) => {
             eprintln!("merge FAILED: {}", e);
             std::process::exit(1);
@@ -347,13 +487,15 @@ fn cmd_benchmark(args: &[String]) {
                     }
                 };
             }
-            s => match s.parse::<u64>() {
-                Ok(v) => packs = v,
-                Err(_) => {
-                    eprintln!("error: unknown argument or bad pack count: {} (see: packopener-cli help)", s);
-                    std::process::exit(2);
+            s => {
+                match s.parse::<u64>() {
+                    Ok(v) => packs = v,
+                    Err(_) => {
+                        eprintln!("error: unknown argument or bad pack count: {} (see: packopener-cli help)", s);
+                        std::process::exit(2);
+                    }
                 }
-            },
+            }
         }
         i += 1;
     }
@@ -465,10 +607,19 @@ fn cmd_simulate(eitem_str: &str, args: &[String]) {
             std::process::exit(2);
         }
     };
+    if packmap(eitem).is_none() {
+        eprintln!(
+            "error: unknown pack id: {} (see: packopener-cli list)",
+            eitem
+        );
+        std::process::exit(2);
+    }
     let mut threads = default_threads();
     let mut slot: Option<usize> = Some(0);
+    let mut slot_was_set = false;
     let mut save_override: Option<String> = None;
-    let mut apply = true;
+    let mut save_was_set = false;
+    let mut apply = false;
     let mut count: Option<u64> = None;
     let mut results_file = "results.simple".to_string();
     let mut sold_flag: Option<String> = None;
@@ -490,6 +641,7 @@ fn cmd_simulate(eitem_str: &str, args: &[String]) {
                 };
             }
             "--slot" => {
+                slot_was_set = true;
                 i += 1;
                 slot = Some(match args.get(i).and_then(|s| s.parse::<usize>().ok()) {
                     Some(v) => v,
@@ -500,6 +652,7 @@ fn cmd_simulate(eitem_str: &str, args: &[String]) {
                 });
             }
             "--save" | "--slot-file" => {
+                save_was_set = true;
                 i += 1;
                 if let Some(v) = args.get(i) {
                     save_override = Some(v.clone());
@@ -512,12 +665,18 @@ fn cmd_simulate(eitem_str: &str, args: &[String]) {
                 i += 1;
                 if let Some(v) = args.get(i) {
                     results_file = v.clone();
+                } else {
+                    eprintln!("error: --results needs a file path");
+                    std::process::exit(2);
                 }
             }
             "--sold" => {
                 i += 1;
                 if let Some(v) = args.get(i) {
                     sold_flag = Some(v.clone());
+                } else {
+                    eprintln!("error: --sold needs a file path");
+                    std::process::exit(2);
                 }
             }
             "--seed" => {
@@ -532,14 +691,13 @@ fn cmd_simulate(eitem_str: &str, args: &[String]) {
             }
             "--width" | "-w" => {
                 i += 1;
-                width_override =
-                    Some(match args.get(i).and_then(|s| s.parse::<usize>().ok()) {
-                        Some(v) => v,
-                        None => {
-                            eprintln!("error: --width needs a number");
-                            std::process::exit(2);
-                        }
-                    });
+                width_override = Some(match args.get(i).and_then(|s| s.parse::<usize>().ok()) {
+                    Some(v) => v,
+                    None => {
+                        eprintln!("error: --width needs a number");
+                        std::process::exit(2);
+                    }
+                });
             }
             "--debug" => debug = true,
             "--backend" => {
@@ -562,7 +720,10 @@ fn cmd_simulate(eitem_str: &str, args: &[String]) {
                 count = Some(match s.parse::<u64>() {
                     Ok(v) => v,
                     Err(_) => {
-                        eprintln!("error: unknown argument or bad count: {} (see: packopener-cli help)", s);
+                        eprintln!(
+                            "error: unknown argument or bad count: {} (see: packopener-cli help)",
+                            s
+                        );
                         std::process::exit(2);
                     }
                 });
@@ -570,6 +731,15 @@ fn cmd_simulate(eitem_str: &str, args: &[String]) {
         }
         i += 1;
     }
+    if slot_was_set && save_was_set {
+        eprintln!("error: --slot and --save cannot be combined");
+        std::process::exit(2);
+    }
+    if apply && !pack_save_supported(eitem) {
+        eprintln!("error: pack id {} cannot be applied to a save (use dry-run or choose a supported pack)", eitem);
+        std::process::exit(2);
+    }
+    let (collection, exp_id) = packmap(eitem).expect("unknown pack type");
     let sp = save_override
         .map(|s| s.trim_end_matches(['/', '\\']).to_string())
         .unwrap_or_else(|| save_path(slot));
@@ -579,10 +749,15 @@ fn cmd_simulate(eitem_str: &str, args: &[String]) {
     } else {
         String::new()
     };
+    if apply && have_save {
+        if let Err(e) = validate_pack_save_fields(&txt, exp_id) {
+            eprintln!("error: {}", e);
+            std::process::exit(2);
+        }
+    }
     let coins = json_f64(&txt, "\"m_CoinAmountDouble\"").unwrap_or(0.0);
     let unit = unit_price(&txt, eitem).unwrap_or(1.61);
-    let shop =
-        json_i64(&txt, "\"m_ShopLevel\"").unwrap_or(SHOP_LEVEL_FALLBACK as i64) as i32;
+    let shop = json_i64(&txt, "\"m_ShopLevel\"").unwrap_or(SHOP_LEVEL_FALLBACK as i64) as i32;
     let affordable = (coins / unit) as u64;
     let requested = count.unwrap_or(affordable);
     let n = if !have_save || !apply {
@@ -590,7 +765,6 @@ fn cmd_simulate(eitem_str: &str, args: &[String]) {
     } else {
         requested.min(affordable)
     };
-    let (collection, exp_id) = packmap(eitem).expect("unknown pack type");
     eprintln!(
         "eitem {} (collection {}, exp {}) | {}/pack | {} coins -> {} packs {}",
         eitem,
@@ -616,11 +790,7 @@ fn cmd_simulate(eitem_str: &str, args: &[String]) {
     }
 
     let pack_cost = n as f64 * unit;
-    let results_stem = results_file
-        .rsplit_once('.')
-        .map(|(s, _)| s)
-        .unwrap_or(results_file.as_str())
-        .to_string();
+    let results_stem = results_stem(&results_file);
     let sold_file = sold_flag.unwrap_or_else(|| format!("{}_sold.simple", results_stem));
     let ckpt_file = format!("{}.ckpt", results_stem);
 
@@ -733,15 +903,12 @@ fn cmd_simulate(eitem_str: &str, args: &[String]) {
                                 last_total_t = now;
                             }
                             let dt = (now - last_display_t).as_secs_f64();
-                            let display = (((last_display as f64 + rate * dt) as u64)
-                                .min(total)
-                                .min(n))
-                            .max(last_display);
+                            let display =
+                                (((last_display as f64 + rate * dt) as u64).min(total).min(n))
+                                    .max(last_display);
                             if tty {
                                 render_bar(display, n, rate, termw, true);
-                            } else if now - last_log >= Duration::from_secs(30)
-                                || total >= n
-                            {
+                            } else if now - last_log >= Duration::from_secs(30) || total >= n {
                                 render_bar(display, n, rate, termw, false);
                                 last_log = now;
                             }
@@ -860,9 +1027,12 @@ fn cmd_simulate(eitem_str: &str, args: &[String]) {
     let sold_text = fs::read_to_string(&sold_file).unwrap_or_default();
     if apply {
         if !have_save {
-            eprintln!("no save found (results only, skipping merge; copy {} back to merge locally)", results_file);
+            eprintln!(
+                "no save found (results only, skipping merge; copy {} back to merge locally)",
+                results_file
+            );
         } else {
-            eprintln!("merging into save (--dry-run to skip)");
+            eprintln!("merging into save");
             match merge_into_save(&sp, true, &results_text, &sold_text, pack_cost) {
                 Ok(()) => eprintln!("merge ok"),
                 Err(e) => {
@@ -885,7 +1055,7 @@ fn main() {
     match args[0].as_str() {
         "help" | "--help" | "-h" => println!("{}", usage()),
         "list" => list_packs(),
-        "status" => status(),
+        "status" => status(&args[1..]),
         "merge" => cmd_merge(&args[1..]),
         "export" => cmd_export(&args[1..]),
         "benchmark" | "bench" => cmd_benchmark(&args[1..]),
@@ -960,7 +1130,22 @@ mod tests {
         assert_eq!(packmap(0), Some((0, 0)));
         assert_eq!(packmap(129), Some((15, 7)));
         assert_eq!(packmap(16), Some((8, 2)));
+        assert_eq!(packmap(17), Some((9, 3)));
+        assert_eq!(packmap(18), Some((10, 4)));
+        assert_eq!(packmap(19), Some((11, 5)));
         assert_eq!(packmap(999999), None);
+    }
+
+    #[test]
+    fn test_results_stem_uses_filename_with_dotted_parent() {
+        assert_eq!(
+            results_stem("/tmp/project.v1/results"),
+            "/tmp/project.v1/results"
+        );
+        assert_eq!(
+            results_stem("/tmp/project.v1/results.simple"),
+            "/tmp/project.v1/results"
+        );
     }
 
     #[test]

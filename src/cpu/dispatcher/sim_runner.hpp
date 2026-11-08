@@ -9,6 +9,12 @@
 #include "src/cpu/dispatcher/writer.hpp"
 #include "src/cpu/dispatcher/sim_direct_exp01.hpp"
 
+// Small runs can skip synchronization; large runs must retain safety folds.
+static inline uint64_t cpu_effective_chunks(uint64_t chunks, bool use_ckpt,
+                                             bool progress, uint64_t max_share) {
+    return (use_ckpt || progress || max_share > 16777216ULL) ? chunks : 1;
+}
+
 template<int EXP_ID, typename SyncChunkFn>
 static void run_sim_fallback(int ti, Rng &rng, int shop, uint64_t chunks, uint64_t start_chunk,
                              const std::vector<uint64_t> &share, std::vector<uint64_t> &states, int &rc,
@@ -71,7 +77,9 @@ template<int EXP_ID>
 static void run_sim(CpuSimContext &ctx) {
     constexpr int ghost_n = 80;
     constexpr bool EXP_CAN_GHOST = (EXP_ID == 0 || EXP_ID == 1 || EXP_ID == 7);
-    const uint64_t effective_chunks = (ctx.use_ckpt || ctx.progress) ? ctx.chunks : 1;
+    const uint64_t max_share = *std::max_element(ctx.share.begin(), ctx.share.end());
+    const uint64_t effective_chunks = cpu_effective_chunks(
+        ctx.chunks, ctx.use_ckpt, ctx.progress != nullptr, max_share);
 
     const int threads = ctx.threads;
     uint32_t *dense_kept = ctx.dense_kept;

@@ -43,7 +43,10 @@ pub fn lib_candidates(name: &str) -> Vec<std::path::PathBuf> {
     }
     #[cfg(windows)]
     if let Ok(userprofile) = std::env::var("USERPROFILE") {
-        dirs.push(std::path::PathBuf::from(format!("{}/.local/lib", userprofile)));
+        dirs.push(std::path::PathBuf::from(format!(
+            "{}/.local/lib",
+            userprofile
+        )));
     }
     dirs.push(std::path::PathBuf::from("/usr/local/lib"));
     dirs.push(std::path::PathBuf::from("/usr/lib"));

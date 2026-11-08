@@ -2,8 +2,10 @@ use crate::ui::{human, money};
 use std::fs;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const INTMAX: i64 = 2147483647;
+static BACKUP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 use crate::json::{
     as_arr, as_arr_mut, as_f64, as_i64, emit, jget, jget_mut, set_bool, set_float, set_int, Parser,
@@ -172,6 +174,9 @@ pub fn amt_key(exp: i32, dest: i32) -> Option<&'static str> {
     match (exp, dest) {
         (0, _) => Some("m_CardCollectedList"),
         (1, _) => Some("m_CardCollectedListDestiny"),
+        (3, _) => Some("m_CardCollectedListMegabot"),
+        (4, _) => Some("m_CardCollectedListFantasyRPG"),
+        (5, _) => Some("m_CardCollectedListCatJob"),
         (7, _) => Some("m_CardCollectedListAscension"),
         (2, 0) => Some("m_CardCollectedListGhost"),
         (2, _) => Some("m_CardCollectedListGhostBlack"),
@@ -182,6 +187,9 @@ pub fn flag_key(exp: i32, dest: i32) -> Option<&'static str> {
     match (exp, dest) {
         (0, _) => Some("m_IsCardCollectedList"),
         (1, _) => Some("m_IsCardCollectedListDestiny"),
+        (3, _) => Some("m_IsCardCollectedListMegabot"),
+        (4, _) => Some("m_IsCardCollectedListFantasyRPG"),
+        (5, _) => Some("m_IsCardCollectedListCatJob"),
         (7, _) => Some("m_IsCardCollectedListAscension"),
         (2, 0) => Some("m_IsCardCollectedListGhost"),
         (2, _) => Some("m_IsCardCollectedListGhostBlack"),
@@ -192,11 +200,39 @@ pub fn gen_price_key(exp: i32, dest: i32) -> Option<&'static str> {
     match (exp, dest) {
         (0, _) => Some("m_GenCardMarketPriceList"),
         (1, _) => Some("m_GenCardMarketPriceListDestiny"),
-        (2, 1) => Some("m_GenCardMarketPriceListGhost"),
+        (3, _) => Some("m_GenCardMarketPriceListMegabot"),
+        (4, _) => Some("m_GenCardMarketPriceListFantasyRPG"),
+        (5, _) => Some("m_GenCardMarketPriceListCatJob"),
+        (2, 0) => Some("m_GenCardMarketPriceListGhost"),
         (2, _) => Some("m_GenCardMarketPriceListGhostBlack"),
         (7, _) => Some("m_GenCardMarketPriceListAscension"),
         _ => None,
     }
+}
+
+pub fn validate_pack_save_fields(save_text: &str, exp: i32) -> Result<(), String> {
+    let mut parser = Parser {
+        b: save_text.as_bytes(),
+        i: 0,
+    };
+    let root = parser
+        .parse_value()
+        .map_err(|e| format!("save parse failed: {}", e))?;
+    validate_save_fields(&root, exp, 0)
+}
+
+fn validate_save_fields(root: &J, exp: i32, dest: i32) -> Result<(), String> {
+    let keys = [
+        amt_key(exp, dest).ok_or_else(|| format!("unsupported save expansion {}", exp))?,
+        flag_key(exp, dest).ok_or_else(|| format!("unsupported save expansion {}", exp))?,
+        gen_price_key(exp, dest).ok_or_else(|| format!("unsupported save expansion {}", exp))?,
+    ];
+    for key in keys {
+        if jget(root, key).and_then(as_arr).is_none() {
+            return Err(format!("save missing required array {}", key));
+        }
+    }
+    Ok(())
 }
 
 pub fn market_value(root: &J, exp: i32, save: usize, dest: i32, foil: bool) -> f64 {
@@ -236,45 +272,6 @@ pub fn req_level(level: i64) -> i64 {
     250 + level * 200 + level * level * 10
 }
 
-struct CardEntry {
-    exp: i32,
-    save: usize,
-    dest: i32,
-    foil: bool,
-    n: i64,
-}
-
-fn parse_card_entry(line: &str, err_msg: &str) -> Result<Option<CardEntry>, String> {
-    let mut parts = line.split_whitespace();
-    let p0 = match parts.next() {
-        Some(s) => s,
-        None => return Ok(None),
-    };
-    let p1 = match parts.next() {
-        Some(s) => s,
-        None => return Ok(None),
-    };
-    let p2 = match parts.next() {
-        Some(s) => s,
-        None => return Ok(None),
-    };
-    let p3 = match parts.next() {
-        Some(s) => s,
-        None => return Ok(None),
-    };
-    let p4 = match parts.next() {
-        Some(s) => s,
-        None => return Ok(None),
-    };
-
-    let exp: i32 = p0.parse().map_err(|_| err_msg.to_string())?;
-    let save: usize = p1.parse().map_err(|_| err_msg.to_string())?;
-    let dest: i32 = p2.parse().map_err(|_| err_msg.to_string())?;
-    let foil: bool = p3 == "1";
-    let n: i64 = p4.parse().map_err(|_| err_msg.to_string())?;
-    Ok(Some(CardEntry { exp, save, dest, foil, n }))
-}
-
 pub fn merge_into_save(
     save_file: &str,
     apply: bool,
@@ -282,33 +279,14 @@ pub fn merge_into_save(
     sold_text: &str,
     pack_cost: f64,
 ) -> Result<(), String> {
+    let results = crate::simple::parse(results_text, "results")?;
+    let sold = crate::simple::parse(sold_text, "sold")?;
     let clean_save = save_file.trim_end_matches(['/', '\\']);
     let clean_save_file = if clean_save.is_empty() {
         save_file
     } else {
         clean_save
     };
-    let save_p = Path::new(clean_save_file);
-    let file_name = save_p
-        .file_name()
-        .and_then(|f| f.to_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("save.json");
-
-    let bak_dir: PathBuf = match std::env::var("PACKSIM_BACKUP_DIR") {
-        Ok(dir) if !dir.trim().is_empty() => {
-            PathBuf::from(dir.trim_end_matches(['/', '\\']))
-        }
-        _ => match save_p.parent() {
-            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
-            _ => PathBuf::from("."),
-        },
-    };
-    let _ = fs::create_dir_all(&bak_dir);
-    let bak = bak_dir.join(format!("{}.bak6", file_name));
-    let bak_tmp = bak_dir.join(format!("{}.bak6.tmp{}", file_name, std::process::id()));
-    fs::copy(clean_save_file, &bak_tmp).map_err(|e| format!("backup failed: {}", e))?;
-    fs::rename(&bak_tmp, &bak).map_err(|e| format!("backup rename failed: {}", e))?;
     let txt = fs::read_to_string(clean_save_file).map_err(|e| format!("read failed: {}", e))?;
     let mut p = Parser {
         b: txt.as_bytes(),
@@ -318,16 +296,21 @@ pub fn merge_into_save(
         .parse_value()
         .map_err(|e| format!("parse failed: {}", e))?;
 
+    if apply {
+        let mut validated = std::collections::HashSet::new();
+        for entry in results.iter().chain(sold.iter()) {
+            if validated.insert((entry.exp, entry.dest)) {
+                validate_save_fields(&root, entry.exp, entry.dest)?;
+            }
+        }
+    }
+
     let mut total_cards: u64 = 0;
     let mut total_xp: i64 = 0;
     let mut total_cash = 0.0f64;
     let mut capped_cards: u64 = 0;
     let mut capped_cash = 0.0f64;
-    for line in results_text.lines() {
-        let entry = match parse_card_entry(line, "bad results line")? {
-            Some(e) => e,
-            None => continue,
-        };
+    for entry in results {
         total_cards += entry.n as u64;
         let ak = amt_key(entry.exp, entry.dest).ok_or_else(|| format!("bad exp {}", entry.exp))?;
         let fk = flag_key(entry.exp, entry.dest).ok_or_else(|| format!("bad exp {}", entry.exp))?;
@@ -374,19 +357,19 @@ pub fn merge_into_save(
     }
 
     let mut sold_lines: u64 = 0;
-    for line in sold_text.lines() {
-        let entry = match parse_card_entry(line, "bad sold line")? {
-            Some(e) => e,
-            None => continue,
-        };
+    for entry in sold {
         sold_lines += entry.n as u64;
-        total_cash += market_value(&root, entry.exp, entry.save, entry.dest, entry.foil) * (entry.n as f64);
+        total_cash +=
+            market_value(&root, entry.exp, entry.save, entry.dest, entry.foil) * (entry.n as f64);
     }
     let mut sweep_cards: u64 = 0;
     let mut sweep_cash = 0.0f64;
     for (ak, exp, dest) in [
         ("m_CardCollectedList", 0, 0),
         ("m_CardCollectedListDestiny", 1, 0),
+        ("m_CardCollectedListMegabot", 3, 0),
+        ("m_CardCollectedListFantasyRPG", 4, 0),
+        ("m_CardCollectedListCatJob", 5, 0),
         ("m_CardCollectedListGhost", 2, 0),
         ("m_CardCollectedListGhostBlack", 2, 1),
         ("m_CardCollectedListAscension", 7, 0),
@@ -528,6 +511,58 @@ pub fn merge_into_save(
     }
 
     if apply {
+        let save_p = Path::new(clean_save_file);
+        let file_name = save_p
+            .file_name()
+            .and_then(|f| f.to_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("save.json");
+
+        let bak_dir: PathBuf = match std::env::var("PACKSIM_BACKUP_DIR") {
+            Ok(dir) if !dir.trim().is_empty() => PathBuf::from(dir),
+            _ => match save_p.parent() {
+                Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+                _ => PathBuf::from("."),
+            },
+        };
+        fs::create_dir_all(&bak_dir).map_err(|e| format!("backup directory failed: {}", e))?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let pid = std::process::id();
+        let bak = loop {
+            let sequence = BACKUP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let candidate = bak_dir.join(format!("{}.bak_{}_{}_{}", file_name, now, pid, sequence));
+            let mut destination = match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&candidate)
+            {
+                Ok(file) => file,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(format!("backup create failed: {}", e)),
+            };
+            let copy_result = (|| {
+                let mut source = fs::File::open(clean_save_file)
+                    .map_err(|e| format!("backup read failed: {}", e))?;
+                std::io::copy(&mut source, &mut destination)
+                    .map_err(|e| format!("backup copy failed: {}", e))?;
+                destination
+                    .sync_all()
+                    .map_err(|e| format!("backup sync failed: {}", e))?;
+                Ok::<(), String>(())
+            })();
+            if let Err(e) = copy_result {
+                drop(destination);
+                let _ = fs::remove_file(&candidate);
+                return Err(e);
+            }
+            drop(destination);
+            break candidate;
+        };
+        eprintln!("backup: {}", bak.display());
+
         let mut out = String::with_capacity(txt.len() + 1024);
         emit(&root, &mut out);
         let save_tmp = format!("{}.tmp{}", clean_save_file, std::process::id());
@@ -543,6 +578,69 @@ pub fn merge_into_save(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn applied_merge_requires_all_target_arrays_before_writing() {
+        let dir =
+            std::env::temp_dir().join(format!("packsim_required_arrays_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("save.json");
+        for (exp, dest) in [(3, 0), (2, 1)] {
+            let keys = [
+                amt_key(exp, dest).unwrap(),
+                flag_key(exp, dest).unwrap(),
+                gen_price_key(exp, dest).unwrap(),
+            ];
+            for missing in keys {
+                for sold_only in [false, true] {
+                    let fields: Vec<_> = keys
+                        .iter()
+                        .filter(|key| **key != missing)
+                        .map(|key| format!("\"{}\":[0]", key))
+                        .collect();
+                    let original = format!("{{{}}}", fields.join(","));
+                    fs::write(&path, &original).unwrap();
+                    let row = format!("{} 0 {} 0 1", exp, dest);
+                    let (results, sold) = if sold_only {
+                        ("", row.as_str())
+                    } else {
+                        (row.as_str(), "")
+                    };
+                    let outcome = merge_into_save(path.to_str().unwrap(), true, results, sold, 0.0);
+                    assert!(
+                        outcome.is_err(),
+                        "accepted missing {missing}, sold_only={sold_only}"
+                    );
+                    assert!(outcome.unwrap_err().contains(missing));
+                    assert_eq!(fs::read_to_string(&path).unwrap(), original);
+                    assert_eq!(
+                        fs::read_dir(&dir).unwrap().count(),
+                        1,
+                        "created a backup on failure"
+                    );
+                }
+            }
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn malformed_results_and_sold_report_line_without_writing() {
+        let path =
+            std::env::temp_dir().join(format!("simple_bad_save_{}.json", std::process::id()));
+        let original = "{}";
+        std::fs::write(&path, original).unwrap();
+        for (results, sold, label) in [
+            ("\n0 0 0 0 bad\n", "", "results"),
+            ("", "\n0 0 0 2 1\n", "sold"),
+        ] {
+            let error =
+                merge_into_save(path.to_str().unwrap(), true, results, sold, 0.0).unwrap_err();
+            assert!(error.contains(label) && error.contains("line 2"), "{error}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        }
+        let _ = std::fs::remove_file(path);
+    }
 
     #[test]
     fn test_json_i64_and_f64() {
@@ -570,7 +668,7 @@ mod tests {
             0.0,
         );
         assert!(res.is_err());
-        assert!(res.unwrap_err().starts_with("backup failed:"));
+        assert!(res.unwrap_err().starts_with("read failed:"));
 
         let temp_dir = std::env::temp_dir();
         let bad_json_path = temp_dir.join(format!("bad_json_{}.json", std::process::id()));
@@ -587,8 +685,6 @@ mod tests {
         assert!(res_slash.unwrap_err().starts_with("parse failed:"));
 
         let _ = std::fs::remove_file(&bad_json_path);
-        let bak_path = temp_dir.join(format!("bad_json_{}.json.bak6", std::process::id()));
-        let _ = std::fs::remove_file(&bak_path);
     }
 
     #[test]
@@ -601,6 +697,43 @@ mod tests {
             std::env::set_var("PACKSIM_SAVE_DIR", o);
         } else {
             std::env::remove_var("PACKSIM_SAVE_DIR");
+        }
+    }
+
+    #[test]
+    fn test_ghost_price_keys_match_inventory_destinations() {
+        assert_eq!(gen_price_key(2, 0), Some("m_GenCardMarketPriceListGhost"));
+        assert_eq!(
+            gen_price_key(2, 1),
+            Some("m_GenCardMarketPriceListGhostBlack")
+        );
+    }
+
+    #[test]
+    fn test_game_expansion_keys_match_assembly_csharp() {
+        for (exp, amount, flag, market) in [
+            (
+                3,
+                "m_CardCollectedListMegabot",
+                "m_IsCardCollectedListMegabot",
+                "m_GenCardMarketPriceListMegabot",
+            ),
+            (
+                4,
+                "m_CardCollectedListFantasyRPG",
+                "m_IsCardCollectedListFantasyRPG",
+                "m_GenCardMarketPriceListFantasyRPG",
+            ),
+            (
+                5,
+                "m_CardCollectedListCatJob",
+                "m_IsCardCollectedListCatJob",
+                "m_GenCardMarketPriceListCatJob",
+            ),
+        ] {
+            assert_eq!(amt_key(exp, 0), Some(amount));
+            assert_eq!(flag_key(exp, 0), Some(flag));
+            assert_eq!(gen_price_key(exp, 0), Some(market));
         }
     }
 }

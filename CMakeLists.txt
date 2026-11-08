@@ -101,6 +101,13 @@ if(BUILD_BENCHMARKS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bench/cpu_bench.cpp"
     add_executable(cpu_bench bench/cpu_bench.cpp)
     target_include_directories(cpu_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(cpu_bench PRIVATE OpenMP::OpenMP_CXX)
+    # The benchmark includes entry.cpp, so it needs the library's optimization
+    # level even when no CMAKE_BUILD_TYPE is selected.
+    if(MSVC)
+        target_compile_options(cpu_bench PRIVATE /O2)
+    else()
+        target_compile_options(cpu_bench PRIVATE -O3)
+    endif()
     if(PACKSIM_NATIVE_ARCH AND NOT MSVC)
         target_compile_options(cpu_bench PRIVATE -march=native -mtune=native)
     endif()
@@ -146,3 +153,8 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test.sh")
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
     )
 endif()
+
+add_executable(cpu_chunk_test tests/cpu_chunk_test.cpp)
+target_include_directories(cpu_chunk_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(cpu_chunk_test PRIVATE packopen_cpu)
+add_test(NAME cpu_chunk_test COMMAND cpu_chunk_test)

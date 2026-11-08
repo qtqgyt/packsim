@@ -176,6 +176,13 @@ else
 fi
 
 if command -v cargo >/dev/null 2>&1; then
+  if (cd "$ROOT/cli" && cargo fmt -- --check >/dev/null 2>&1); then
+    echo "PASS rustfmt"
+  else
+    echo "FAIL rustfmt"
+    fails=$((fails+1))
+  fi
+
   if (cd "$ROOT/cli" && cargo clippy --release --offline -- -D warnings >/dev/null 2>&1); then
     echo "PASS clippy"
   else

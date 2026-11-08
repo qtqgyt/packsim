@@ -62,7 +62,9 @@ fn gen_string(rng: &mut Rng) -> String {
     for _ in 0..len {
         let c = match rng.range(0, 100) {
             0..=20 => rng.range(0x20, 0x7E) as u8 as char, // printable ascii
-            21..=40 => rng.choose(&['\\', '"', '/', '\x08', '\x0C', '\n', '\r', '\t']).clone(), // control/escaped characters
+            21..=40 => rng
+                .choose(&['\\', '"', '/', '\x08', '\x0C', '\n', '\r', '\t'])
+                .clone(), // control/escaped characters
             41..=80 => char::from_u32(rng.range(0x00A0, 0xD7FF) as u32).unwrap_or('?'), // bmp
             _ => char::from_u32(rng.range(0xE000, 0x10FFFF) as u32).unwrap_or('?'), // high bmp and supplementary
         };
@@ -73,29 +75,49 @@ fn gen_string(rng: &mut Rng) -> String {
 
 fn gen_num(rng: &mut Rng) -> J {
     match rng.range(0, 4) {
-        0 => { // integer
+        0 => {
+            // integer
             let val = rng.next_u64() as i64;
             let raw = val.to_string();
             let fval = val as f64;
-            J::Num { raw, ival: Some(val), fval }
+            J::Num {
+                raw,
+                ival: Some(val),
+                fval,
+            }
         }
-        1 => { // floating point
+        1 => {
+            // floating point
             let mut val = rng.next_f64() * 1e6;
             if rng.next_bool() {
                 val = -val;
             }
             let raw = val.to_string();
-            J::Num { raw, ival: None, fval: val }
+            J::Num {
+                raw,
+                ival: None,
+                fval: val,
+            }
         }
-        2 => { // scientific notation
+        2 => {
+            // scientific notation
             let mantissa = rng.next_f64() * 10.0;
             let exponent = rng.range(0, 20) as i32 - 10;
             let raw = format!("{}e{}", mantissa, exponent);
             let fval = raw.parse::<f64>().unwrap_or(f64::NAN);
-            J::Num { raw, ival: None, fval }
+            J::Num {
+                raw,
+                ival: None,
+                fval,
+            }
         }
-        _ => { // zero
-            J::Num { raw: "0".to_string(), ival: Some(0), fval: 0.0 }
+        _ => {
+            // zero
+            J::Num {
+                raw: "0".to_string(),
+                ival: Some(0),
+                fval: 0.0,
+            }
         }
     }
 }
@@ -125,8 +147,11 @@ fn gen_j(rng: &mut Rng, depth: usize) -> J {
             1 => J::Bool(rng.next_bool()),
             2 => {
                 let s = gen_string(rng);
-                J::Str { raw: escape_string(&s), val: s }
-            },
+                J::Str {
+                    raw: escape_string(&s),
+                    val: s,
+                }
+            }
             _ => gen_num(rng),
         }
     } else {
@@ -135,8 +160,11 @@ fn gen_j(rng: &mut Rng, depth: usize) -> J {
             1 => J::Bool(rng.next_bool()),
             2 => {
                 let s = gen_string(rng);
-                J::Str { raw: escape_string(&s), val: s }
-            },
+                J::Str {
+                    raw: escape_string(&s),
+                    val: s,
+                }
+            }
             3 => gen_num(rng),
             4 => {
                 let len = rng.range(0, 10);
@@ -211,14 +239,23 @@ fn test_json_roundtrip_property() {
         let mut emitted = String::new();
         emit(&ast, &mut emitted);
 
-        let mut parser = Parser { b: emitted.as_bytes(), i: 0 };
+        let mut parser = Parser {
+            b: emitted.as_bytes(),
+            i: 0,
+        };
         let parsed = match parser.parse_value() {
             Ok(v) => v,
-            Err(e) => panic!("Failed to parse emitted JSON on iteration {}: error {}, JSON: {}", i, e, emitted),
+            Err(e) => panic!(
+                "Failed to parse emitted JSON on iteration {}: error {}, JSON: {}",
+                i, e, emitted
+            ),
         };
 
         if !j_eq(&ast, &parsed) {
-            panic!("Roundtrip mismatch on iteration {}!\nEmitted: {}", i, emitted);
+            panic!(
+                "Roundtrip mismatch on iteration {}!\nEmitted: {}",
+                i, emitted
+            );
         }
     }
 }

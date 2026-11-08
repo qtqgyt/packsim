@@ -37,6 +37,12 @@ cmake --build build
 cmake --build build --target packopener-cli
 ```
 
+To configure specific CUDA GPU architectures (see [docs/gpu-builds.md](docs/gpu-builds.md)):
+```bash
+cmake -S . -B build -DCMAKE_CUDA_ARCHITECTURES="75"
+cmake --build build --target packopen_gpu
+```
+
 ### Run Tests
 
 ```bash
@@ -47,25 +53,66 @@ cmake --build build --target packopener-cli
 
 ## CLI Usage
 
+Dry-run is the default for both `simulate` and `merge`. Pass `--apply` to write changes into the game save.
+
 ```text
-packopener-cli <eitem> [count] [options]    simulate and merge into a save
+packopener-cli <eitem> [count] [options]    simulate pack openings (dry-run by default; --apply to merge)
 packopener-cli list                         show pack types
-packopener-cli status                       show save state
+packopener-cli status [options]             show save state
 packopener-cli benchmark [packs] [options]  measure backend throughput
-packopener-cli merge [file] [options]       merge a results file
+packopener-cli merge [file] [options]       merge an existing results file (dry-run by default; --apply to write)
 packopener-cli export <file> --format <f>   export results as CSV or JSON
 ```
 
+### Cost Accounting & Safety
+
+- **Simulation (`--apply`)**: Deducts pack cost (`count x unit price`) from coins and adds cash for overflow-sold cards.
+- **Merge (`--apply`)**: Merges cards and overflow-sold cash from sidecar into save; does not deduct pack cost (pack type and count unknown).
+- **Backups**: Every applied write preserves previous recovery backups with unique timestamped backup names and reports the backup path. Dry-run operations do not create or overwrite backups.
+
+### Results Format
+
+The kept and sold `.simple` files contain one whitespace-separated row per nonzero histogram entry: `<exp> <subvariant> <destiny> <foil> <count>`.
+- `exp`: 4-bit expansion ID (`0` through `15`; e.g. `0` = Tetramon, `1` = Destiny, `2` = Ghost, `3` = Megabot, `4` = FantasyRPG, `5` = CatJob, `7` = Ascension).
+- `subvariant`: 12-bit save index (`0` through `4095`) encoding `card_position * per_of(exp) + border`, where `per_of` is 2 for Ghost (`exp` 2) and 12 for other expansions.
+- `destiny`: 1-bit native destiny value (`0` or `1`), indicating destiny variant / destination bit (e.g. 0 for Tetramon, 1 for Destiny, 0 or 1 for Ghost vs Ghost Black). Validated strictly as `0` or `1`.
+- `foil`: `0` or `1` indicating a foil card.
+- `count`: Nonnegative integer card count (must fit in a signed 64-bit integer for the CLI).
+
+Blank lines are ignored; every other line must have exactly five valid fields. Merge and export reject malformed rows with their line number.
+
+### Export Format
+
+The `export` command decodes raw `.simple` rows into structured CSV or JSON:
+- `exp`: Expansion ID integer.
+- `exp_name`: Expansion display name (`"Tetramon"`, `"Destiny"`, `"Ghost"`, etc.).
+- `card_id`: Decoded zero-based card ID / position (`subvariant / per_of(exp)`).
+- `border`: Border variant index (`subvariant % per_of(exp)`).
+- `border_name`: Border display name (`"Normal"`, `"1st Edition"`, `"Silver"`, `"Gold"`, `"EX"`, `"Full Art"`).
+- `foil`: Boolean (`true` or `false`).
+- `count`: Integer card count.
+- `destiny`: Boolean (`true` or `false`), decoded from the native destiny bit (`destiny == 1`).
+
 ### Examples
 
-Simulate without merging:
+Simulate pack opening (dry-run by default):
 ```bash
-./packopener-cli 0 1000000 --seed 0x12345678abcdef01 --dry-run
+./packopener-cli 0 1000000 --seed 0x12345678abcdef01
 ```
 
 Simulate and merge into save:
 ```bash
 ./packopener-cli 0 500000 --apply
+```
+
+Merge existing results file (dry-run by default):
+```bash
+./packopener-cli merge results.simple
+```
+
+Merge existing results file and apply to save:
+```bash
+./packopener-cli merge results.simple --apply
 ```
 
 ---
